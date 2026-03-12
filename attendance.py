@@ -24,8 +24,8 @@ from config import (
 )
 from camera import connect_camera, read_frame, release_camera
 from preprocess import preprocess_frame, get_display_frame
-from detect import detect_and_encode
-from recognize import match_embedding
+from detect import detect_faces
+from recognize import extract_features, match_embedding
 from database import (
     init_db,
     load_all_encodings,
@@ -110,9 +110,9 @@ def attendance(source, class_name: str, late_minutes: int = LATE_MINUTES):
                         break
                 continue
 
-            # Process frame — InsightFace does detect + encode in one GPU pass
+            # Process frame — YuNet detects faces and landmarks
             rgb = preprocess_frame(frame)
-            faces = detect_and_encode(rgb)
+            faces = detect_faces(rgb)
             display = get_display_frame(frame)
 
             # Compute display scale
@@ -123,8 +123,10 @@ def attendance(source, class_name: str, late_minutes: int = LATE_MINUTES):
                 handle_absent(conn, session_id, state)
             else:
                 for face in faces:
-                    x1, y1, x2, y2 = [int(v) for v in face.bbox]
-                    embedding = face.embedding  # 512-D vector
+                    x1, y1, x2, y2 = face["bbox"]
+
+                    # SFace extraction using 5 landmarks
+                    embedding = extract_features(rgb, face)
 
                     if embedding is None:
                         continue

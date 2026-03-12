@@ -28,8 +28,8 @@ from database import (
 )
 from camera import connect_camera, read_frame, release_camera
 from preprocess import preprocess_frame, get_display_frame
-from detect import detect_and_encode, crop_face
-from recognize import match_embedding
+from detect import detect_faces, crop_face
+from recognize import extract_features, match_embedding
 from enrollment import estimate_blur, estimate_brightness, remove_outliers
 from report import export_report
 
@@ -306,7 +306,8 @@ def _generate_mjpeg():
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
             )
-        time.sleep(0.05)
+        # Giảm cực đại sleep để mjpeg stream nhanh nhất có thể (chạy ~60 FPS)
+        time.sleep(0.015)
 
 
 @app.route("/video_feed")
@@ -330,15 +331,24 @@ def _enrollment_worker(student_id, name, source, samples_needed):
         samples = []
         enrollment_status["message"] = "Camera connected. Look at the camera."
 
+        frame_idx = 0
         while len(samples) < samples_needed and enrollment_status["running"]:
             frame = read_frame(cap)
             if frame is None:
-                time.sleep(0.01)
                 continue
-
-            rgb = preprocess_frame(frame)
-            faces = detect_and_encode(rgb)
+                
+            frame_idx += 1
             display = get_display_frame(frame)
+            
+            # Chỉ chạy nhận diện 1 lần mỗi FRAME_SKIP frames để tránh quá tải CPU,
+            # các frame còn lại chỉ cập nhật lên màn hình để web mượt mà.
+            if FRAME_SKIP > 1 and frame_idx % FRAME_SKIP != 0:
+                with frame_lock:
+                    current_frame = display.copy()
+                continue
+                
+            rgb = preprocess_frame(frame)
+            faces = detect_faces(rgb)
 
             status_text = f"Samples: {len(samples)}/{samples_needed}"
 
@@ -348,7 +358,7 @@ def _enrollment_worker(student_id, name, source, samples_needed):
                 status_text += " | Multiple faces! Only 1 allowed"
             else:
                 face = faces[0]
-                x1, y1, x2, y2 = [int(v) for v in face.bbox]
+                x1, y1, x2, y2 = face["bbox"]
                 face_crop = crop_face(rgb, (x1, y1, x2, y2))
                 face_h, face_w = face_crop.shape[:2]
 
@@ -365,7 +375,7 @@ def _enrollment_worker(student_id, name, source, samples_needed):
                 elif estimate_brightness(face_crop) < 40:
                     status_text += " | Too dark"
                 else:
-                    embedding = face.embedding
+                    embedding = extract_features(rgb, face)
                     if embedding is not None:
                         samples.append(embedding)
                         status_text += f" | ✓ Captured!"
@@ -386,7 +396,7 @@ def _enrollment_worker(student_id, name, source, samples_needed):
 
             enrollment_status["progress"] = len(samples)
             enrollment_status["message"] = status_text
-            time.sleep(0.05)
+            # Bỏ sleep 0.05 ở đây để webcam quét liên tục, mượt mà
 
         release_camera(cap)
 
@@ -462,7 +472,7 @@ def _attendance_worker(source, class_name, late_minutes):
                 continue
 
             rgb = preprocess_frame(frame)
-            faces = detect_and_encode(rgb)
+            faces = detect_faces(rgb)
             display = get_display_frame(frame)
 
             scale_x = display.shape[1] / rgb.shape[1]
@@ -474,8 +484,8 @@ def _attendance_worker(source, class_name, late_minutes):
                 handle_absent_web(conn, session_id, state)
             else:
                 for face in faces:
-                    x1, y1, x2, y2 = [int(v) for v in face.bbox]
-                    embedding = face.embedding
+                    x1, y1, x2, y2 = face["bbox"]
+                    embedding = extract_features(rgb, face)
                     if embedding is None:
                         continue
 

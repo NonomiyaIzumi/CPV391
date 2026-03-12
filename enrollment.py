@@ -23,7 +23,8 @@ from config import (
 )
 from camera import connect_camera, read_frame, release_camera
 from preprocess import preprocess_frame, get_display_frame
-from detect import detect_and_encode, crop_face
+from detect import detect_faces, crop_face
+from recognize import extract_features
 from database import init_db, upsert_student, insert_face_encoding, delete_encodings_for_student
 
 
@@ -82,8 +83,8 @@ def enrollment(student_id: str, name: str, source, samples_needed: int = REQUIRE
             frame_count += 1
             rgb = preprocess_frame(frame)
 
-            # InsightFace: detect + encode in one pass
-            faces = detect_and_encode(rgb)
+            # YuNet: detect bounding box and landmarks
+            faces = detect_faces(rgb)
 
             display = get_display_frame(frame)
             status_text = f"Samples: {len(samples)}/{samples_needed}"
@@ -96,7 +97,7 @@ def enrollment(student_id: str, name: str, source, samples_needed: int = REQUIRE
                 status_text += " | Multiple faces! Only 1 allowed"
             else:
                 face = faces[0]
-                x1, y1, x2, y2 = [int(v) for v in face.bbox]
+                x1, y1, x2, y2 = face["bbox"]
                 face_crop = crop_face(rgb, (x1, y1, x2, y2))
                 face_h, face_w = face_crop.shape[:2]
 
@@ -110,11 +111,11 @@ def enrollment(student_id: str, name: str, source, samples_needed: int = REQUIRE
                     skipped_reasons["too_dark"] += 1
                     status_text += " | Too dark"
                 else:
-                    # Embedding already computed by InsightFace
-                    embedding = face.embedding  # 512-D vector
+                    # SFace: extract 128-D embedding from aligned crop
+                    embedding = extract_features(rgb, face)
                     if embedding is not None:
                         samples.append(embedding)
-                        status_text += f" | ✓ Captured! (score: {face.det_score:.2f})"
+                        status_text += f" | ✓ Captured! (score: {face['det_score']:.2f})"
 
                 # Draw bbox on display
                 scale_x = display.shape[1] / rgb.shape[1]
@@ -165,11 +166,11 @@ def enrollment(student_id: str, name: str, source, samples_needed: int = REQUIRE
     if SAVE_ALL_SAMPLES:
         for emb in filtered:
             insert_face_encoding(conn, student_id, emb, quality=1.0)
-        print(f"[Enrollment] Saved {len(filtered)} embeddings (512-D) to DB.")
+        print(f"[Enrollment] Saved {len(filtered)} embeddings (128-D) to DB.")
     else:
         mean_emb = np.mean(filtered, axis=0)
         insert_face_encoding(conn, student_id, mean_emb, quality=1.0)
-        print("[Enrollment] Saved 1 mean embedding (512-D) to DB.")
+        print("[Enrollment] Saved 1 mean embedding (128-D) to DB.")
 
     print(f"[Enrollment] Skip reasons: {skipped_reasons}")
     print(f"[Enrollment] ✓ {name} ({student_id}) registered successfully!\n")
