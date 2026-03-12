@@ -63,6 +63,16 @@ CREATE INDEX IF NOT EXISTS idx_att_session
     ON attendance_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_move_session_student
     ON movement_log(session_id, student_id);
+
+CREATE TABLE IF NOT EXISTS student_courses (
+    student_id  TEXT NOT NULL,
+    course_name TEXT NOT NULL,
+    PRIMARY KEY(student_id, course_name),
+    FOREIGN KEY(student_id) REFERENCES students(student_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_student_courses_course
+    ON student_courses(course_name);
 """
 
 
@@ -135,8 +145,66 @@ def load_all_encodings(conn: sqlite3.Connection) -> dict:
     known: dict[str, list[np.ndarray]] = {}
     for row in rows:
         vec = deserialize_embedding(row["encoding"])
+    return known
+
+
+def load_encodings_by_course(conn: sqlite3.Connection, course_name: str) -> dict:
+    """Return {student_id: [np.array, ...]} for students enrolled in `course_name`."""
+    rows = conn.execute(
+        """SELECT f.student_id, f.encoding 
+           FROM face_encodings f
+           JOIN student_courses sc ON f.student_id = sc.student_id
+           WHERE sc.course_name = ?""",
+        (course_name,)
+    ).fetchall()
+    known: dict[str, list[np.ndarray]] = {}
+    for row in rows:
+        vec = deserialize_embedding(row["encoding"])
         known.setdefault(row["student_id"], []).append(vec)
     return known
+
+
+# ── Courses ────────────────────────────────────────────────────
+def add_student_to_course(conn: sqlite3.Connection, student_id: str, course_name: str):
+    conn.execute(
+        "INSERT OR IGNORE INTO student_courses(student_id, course_name) VALUES (?, ?)",
+        (student_id, course_name),
+    )
+    conn.commit()
+
+
+def remove_student_from_course(conn: sqlite3.Connection, student_id: str, course_name: str):
+    conn.execute(
+        "DELETE FROM student_courses WHERE student_id = ? AND course_name = ?",
+        (student_id, course_name),
+    )
+    conn.commit()
+
+
+def get_student_courses(conn: sqlite3.Connection, student_id: str):
+    rows = conn.execute(
+        "SELECT course_name FROM student_courses WHERE student_id = ?",
+        (student_id,)
+    ).fetchall()
+    return [r["course_name"] for r in rows]
+
+
+def get_students_by_course(conn: sqlite3.Connection, course_name: str):
+    rows = conn.execute(
+        """SELECT s.* FROM students s
+           JOIN student_courses sc ON s.student_id = sc.student_id
+           WHERE sc.course_name = ?""",
+        (course_name,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_student(conn: sqlite3.Connection, student_id: str):
+    conn.execute("DELETE FROM face_encodings WHERE student_id = ?", (student_id,))
+    conn.execute("DELETE FROM student_courses WHERE student_id = ?", (student_id,))
+    # We keep attendance_records and movement_log for reporting history
+    conn.execute("DELETE FROM students WHERE student_id = ?", (student_id,))
+    conn.commit()
 
 
 # ── Class Sessions ─────────────────────────────────────────────

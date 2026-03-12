@@ -3,7 +3,9 @@ Report module: export attendance records to CSV.
 """
 import argparse
 import csv
+import os
 import sqlite3
+from datetime import datetime
 
 from config import DB_PATH
 from database import init_db, get_attendance_for_session, get_session, get_all_sessions

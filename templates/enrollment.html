@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% set active = "enrollment" %}
+{% block title %}Enrollment{% endblock %}
+{% block page_title %}Student Enrollment{% endblock %}
+
+{% block content %}
+<div class="grid-2col">
+    <div class="card" id="enrollment-form-card">
+        <div class="card-header">
+            <h2>Register New Student</h2>
+        </div>
+        <div class="card-body">
+            <form id="enrollment-form" onsubmit="return false;">
+                <div class="form-group">
+                    <label for="student_id">Student ID</label>
+                    <input type="text" id="student_id" name="student_id" placeholder="e.g. SE12345" required>
+                </div>
+                <div class="form-group">
+                    <label for="student_name">Student Name</label>
+                    <input type="text" id="student_name" name="name" placeholder="e.g. Nguyen Van A" required>
+                </div>
+                <div class="form-group">
+                    <label for="samples">Number of Samples</label>
+                    <input type="range" id="samples" name="samples" min="5" max="30" value="20"
+                           oninput="document.getElementById('samples-val').textContent = this.value">
+                    <span class="range-value" id="samples-val">20</span>
+                </div>
+                <div class="form-group">
+                    <label for="source">Camera Source</label>
+                    <input type="text" id="source" name="source" value="0" placeholder="0 = webcam, or RTSP URL">
+                </div>
+                <button type="button" class="btn btn-primary btn-block" id="btn-start-enrollment"
+                        onclick="startEnrollment()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;margin-right:8px"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+                    Start Enrollment
+                </button>
+            </form>
+
+            <div class="enrollment-progress" id="enrollment-progress" style="display:none;">
+                <div class="progress-info">
+                    <span id="enroll-status-text">Starting...</span>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="enroll-progress-bar" style="width:0%"></div>
+                </div>
+                <div class="progress-numbers">
+                    <span id="enroll-progress-num">0</span> / <span id="enroll-progress-total">20</span> samples
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" id="camera-preview-card">
+        <div class="card-header">
+            <h2>Camera Preview</h2>
+            <div class="led-indicator" id="camera-led"></div>
+        </div>
+        <div class="card-body camera-body">
+            <div class="camera-feed">
+                <img id="video-feed" src="/video_feed" alt="Camera Feed">
+                <div class="camera-overlay" id="camera-overlay">
+                    <div class="overlay-text">Camera Inactive</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card" id="enrolled-list-card">
+    <div class="card-header">
+        <h2>Enrolled Students</h2>
+        <span class="badge badge-blue">{{ students|length }} students</span>
+    </div>
+    <div class="card-body">
+        {% if students %}
+        <table class="data-table" id="enrolled-table">
+            <thead>
+                <tr>
+                    <th>Student ID</th>
+                    <th>Name</th>
+                    <th>Samples</th>
+                    <th>Registered</th>
+                    <th>Courses</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in students %}
+                <tr>
+                    <td><span class="badge badge-blue">{{ s.student_id }}</span></td>
+                    <td>{{ s.name }}</td>
+                    <td>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width: {{ [s.encoding_count / 20 * 100, 100]|min }}%"></div>
+                            <span>{{ s.encoding_count }}</span>
+                        </div>
+                    </td>
+                    <td>{{ s.created_at[:10] if s.created_at else 'N/A' }}</td>
+                    <td>
+                        <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+                            {% for c in s.courses %}
+                            <span class="badge badge-orange" style="display: flex; align-items: center; gap: 4px;">
+                                {{ c }}
+                                <span style="cursor:pointer; font-weight: bold; font-size: 14px;" onclick="removeCourse('{{ s.student_id }}', '{{ c }}')" title="Remove">&times;</span>
+                            </span>
+                            {% endfor %}
+                            <button class="btn btn-primary" style="padding: 2px 6px; font-size: 12px;" onclick="promptAddCourse('{{ s.student_id }}')">+ Add</button>
+                        </div>
+                    </td>
+                    <td>
+                        <button class="btn btn-danger" style="padding: 4px 8px; font-size: 12px;" onclick="deleteStudent('{{ s.student_id }}')">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <p>No students enrolled yet. Use the form above to register.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function startEnrollment() {
+    const studentId = document.getElementById('student_id').value.trim();
+    const name = document.getElementById('student_name').value.trim();
+    const samples = document.getElementById('samples').value;
+    const source = document.getElementById('source').value.trim();
+
+    if (!studentId || !name) {
+        alert('Please enter Student ID and Name!');
+        return;
+    }
+
+    document.getElementById('enrollment-progress').style.display = 'block';
+    document.getElementById('btn-start-enrollment').disabled = true;
+    document.getElementById('camera-overlay').style.display = 'none';
+    document.getElementById('camera-led').classList.add('active');
+    document.getElementById('enroll-progress-total').textContent = samples;
+
+    fetch('/api/enrollment/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_id: studentId, name: name, samples: parseInt(samples), source: source })
+    })
+    .then(r => r.json())
+    .then(() => {
+        pollEnrollmentStatus();
+    })
+    .catch(err => {
+        alert('Error: ' + err);
+        document.getElementById('btn-start-enrollment').disabled = false;
+    });
+}
+
+function pollEnrollmentStatus() {
+    const interval = setInterval(() => {
+        fetch('/api/enrollment/status')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('enroll-status-text').textContent = data.message;
+                document.getElementById('enroll-progress-num').textContent = data.progress;
+                const pct = (data.progress / data.total * 100).toFixed(0);
+                document.getElementById('enroll-progress-bar').style.width = pct + '%';
+
+                if (data.done) {
+                    clearInterval(interval);
+                    document.getElementById('btn-start-enrollment').disabled = false;
+                    document.getElementById('camera-led').classList.remove('active');
+                    if (data.success) {
+                        document.getElementById('enroll-status-text').textContent = '✓ ' + data.message;
+                        setTimeout(() => location.reload(), 2000);
+                    }
+                }
+            });
+    }, 500);
+}
+
+function deleteStudent(studentId) {
+    if (!confirm('Are you sure you want to delete student ' + studentId + '? This cannot be undone.')) return;
+    fetch('/api/students/' + studentId, { method: 'DELETE' })
+        .then(r => r.json())
+        .then(data => location.reload())
+        .catch(err => alert('Error: ' + err));
+}
+
+function promptAddCourse(studentId) {
+    const course = prompt('Enter course name (e.g. CPV391):');
+    if (!course || !course.trim()) return;
+    fetch('/api/students/' + studentId + '/courses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ course_name: course.trim() })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) alert(data.error);
+        else location.reload();
+    })
+    .catch(err => alert('Error: ' + err));
+}
+
+function removeCourse(studentId, course) {
+    if (!confirm('Remove ' + studentId + ' from ' + course + '?')) return;
+    fetch('/api/students/' + studentId + '/courses/' + course, { method: 'DELETE' })
+        .then(r => r.json())
+        .then(data => location.reload())
+        .catch(err => alert('Error: ' + err));
+}
+</script>
+{% endblock %}

@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% set active = "attendance" %}
+{% block title %}Attendance{% endblock %}
+{% block page_title %}Real-time Attendance{% endblock %}
+
+{% block content %}
+<div class="grid-2col">
+    <div class="card" id="attendance-control-card">
+        <div class="card-header">
+            <h2>Session Control</h2>
+            <div class="led-indicator" id="session-led"></div>
+        </div>
+        <div class="card-body">
+            <form id="attendance-form" onsubmit="return false;">
+                <div class="form-group">
+                    <label for="class_name">Class Name</label>
+                    <input type="text" id="class_name" value="CPV391" placeholder="e.g. CPV391">
+                </div>
+                <div class="form-group">
+                    <label for="late_minutes">Late Window (minutes)</label>
+                    <input type="number" id="late_minutes" value="10" min="1" max="60">
+                </div>
+                <div class="form-group">
+                    <label for="att_source">Camera Source</label>
+                    <input type="text" id="att_source" value="0" placeholder="0 = webcam, or RTSP URL">
+                </div>
+                <div class="btn-group">
+                    <button type="button" class="btn btn-primary btn-block" id="btn-start-session" onclick="startAttendance()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;margin-right:8px"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                        Start Session
+                    </button>
+                    <button type="button" class="btn btn-danger btn-block" id="btn-stop-session" onclick="stopAttendance()" style="display:none;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;margin-right:8px"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                        End Session
+                    </button>
+                </div>
+            </form>
+
+            <div class="session-info" id="session-info" style="display:none;">
+                <div class="info-row">
+                    <span class="info-label">Session ID</span>
+                    <span class="info-value" id="att-session-id">—</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Class</span>
+                    <span class="info-value" id="att-class-name">—</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Start Time</span>
+                    <span class="info-value" id="att-start-time">—</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">FPS</span>
+                    <span class="info-value" id="att-fps">—</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Students Detected</span>
+                    <span class="info-value badge badge-green" id="att-students-count">0</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" id="camera-feed-card">
+        <div class="card-header">
+            <h2>Live Camera Feed</h2>
+        </div>
+        <div class="card-body camera-body">
+            <div class="camera-feed">
+                <img id="video-feed" src="/video_feed" alt="Camera Feed">
+                <div class="camera-overlay" id="camera-overlay">
+                    <div class="overlay-text">Start a session to activate camera</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card" id="recognized-card">
+    <div class="card-header">
+        <h2>Recognized Students</h2>
+        <span class="badge badge-green" id="recognized-count">0</span>
+    </div>
+    <div class="card-body">
+        <table class="data-table" id="recognized-table">
+            <thead>
+                <tr>
+                    <th>Student ID</th>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Confidence</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody id="recognized-tbody">
+                <tr class="empty-row">
+                    <td colspan="5">
+                        <div class="empty-state">
+                            <p>No students detected yet. Start a session to begin.</p>
+                        </div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let attendancePolling = null;
+let allRecognized = {};
+
+function startAttendance() {
+    const className = document.getElementById('class_name').value.trim();
+    const lateMinutes = parseInt(document.getElementById('late_minutes').value);
+    const source = document.getElementById('att_source').value.trim();
+
+    fetch('/api/attendance/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ class_name: className, late_minutes: lateMinutes, source: source })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            alert(data.error);
+            return;
+        }
+        document.getElementById('btn-start-session').style.display = 'none';
+        document.getElementById('btn-stop-session').style.display = 'block';
+        document.getElementById('session-info').style.display = 'block';
+        document.getElementById('camera-overlay').style.display = 'none';
+        document.getElementById('session-led').classList.add('active');
+        document.getElementById('att-class-name').textContent = className;
+        allRecognized = {};
+        pollAttendanceStatus();
+    })
+    .catch(err => alert('Error: ' + err));
+}
+
+function stopAttendance() {
+    if (!confirm('End this session?')) return;
+    fetch('/api/attendance/stop', { method: 'POST' })
+        .then(r => r.json())
+        .then(() => {
+            document.getElementById('btn-start-session').style.display = 'block';
+            document.getElementById('btn-stop-session').style.display = 'none';
+            document.getElementById('session-led').classList.remove('active');
+            if (attendancePolling) clearInterval(attendancePolling);
+        });
+}
+
+function pollAttendanceStatus() {
+    attendancePolling = setInterval(() => {
+        fetch('/api/attendance/status')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('att-session-id').textContent = (data.session_id || '—').substring(0, 8) + '...';
+                document.getElementById('att-start-time').textContent = data.start_time ? data.start_time.substring(11, 19) : '—';
+                document.getElementById('att-fps').textContent = data.fps || '—';
+                document.getElementById('att-students-count').textContent = data.students_detected || 0;
+
+                // Update recognized list
+                if (data.recognized && data.recognized.length > 0) {
+                    data.recognized.forEach(r => {
+                        allRecognized[r.student_id] = r;
+                    });
+                    renderRecognized();
+                }
+
+                if (!data.running) {
+                    clearInterval(attendancePolling);
+                    document.getElementById('btn-start-session').style.display = 'block';
+                    document.getElementById('btn-stop-session').style.display = 'none';
+                    document.getElementById('session-led').classList.remove('active');
+
+                    if (data.session_id) {
+                        setTimeout(() => {
+                            if (confirm('Session ended. View report?')) {
+                                window.location.href = '/reports/' + data.session_id;
+                            }
+                        }, 500);
+                    }
+                }
+            });
+    }, 800);
+}
+
+function renderRecognized() {
+    const tbody = document.getElementById('recognized-tbody');
+    const entries = Object.values(allRecognized);
+    document.getElementById('recognized-count').textContent = entries.length;
+
+    if (entries.length === 0) return;
+
+    tbody.innerHTML = entries.map(r => `
+        <tr class="fade-in">
+            <td><span class="badge badge-blue">${r.student_id}</span></td>
+            <td>${r.name}</td>
+            <td><span class="badge ${r.status === 'Present' ? 'badge-green' : 'badge-orange'}">${r.status}</span></td>
+            <td>
+                <div class="confidence-bar">
+                    <div class="confidence-fill" style="width: ${r.confidence}%"></div>
+                    <span>${r.confidence}%</span>
+                </div>
+            </td>
+            <td>${r.time}</td>
+        </tr>
+    `).join('');
+}
+</script>
+{% endblock %}

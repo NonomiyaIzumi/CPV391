@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% set active = "reports" %}
+{% block title %}Report Detail{% endblock %}
+{% block page_title %}Session Report{% endblock %}
+
+{% block content %}
+{% if session %}
+<div class="stats-grid">
+    <div class="stat-card stat-blue" id="rd-class">
+        <div class="stat-info">
+            <span class="stat-value">{{ session.class_name or 'N/A' }}</span>
+            <span class="stat-label">Class Name</span>
+        </div>
+    </div>
+    <div class="stat-card stat-purple" id="rd-start">
+        <div class="stat-info">
+            <span class="stat-value">{{ session.start_time[11:19] if session.start_time else 'N/A' }}</span>
+            <span class="stat-label">Start Time</span>
+        </div>
+    </div>
+    <div class="stat-card stat-green" id="rd-total">
+        <div class="stat-info">
+            <span class="stat-value">{{ records|length }}</span>
+            <span class="stat-label">Total Students</span>
+        </div>
+    </div>
+</div>
+
+<div class="card" id="report-detail-card">
+    <div class="card-header">
+        <h2>Attendance Records</h2>
+        <div class="btn-group-inline">
+            <a href="/api/sessions/{{ session.session_id }}/export" class="btn btn-sm btn-primary">Download CSV</a>
+            <a href="/reports" class="btn btn-sm btn-outline">Back</a>
+        </div>
+    </div>
+    <div class="card-body">
+        {% if records %}
+        <table class="data-table" id="detail-records-table">
+            <thead>
+                <tr>
+                    <th>Student ID</th>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>First Seen</th>
+                    <th>Last Seen</th>
+                    <th>Checkout</th>
+                    <th>Confidence</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in records %}
+                <tr>
+                    <td><span class="badge badge-blue">{{ r.student_id }}</span></td>
+                    <td>{{ r.name }}</td>
+                    <td>
+                        <span class="badge {% if r.status == 'Present' %}badge-green{% else %}badge-orange{% endif %}">
+                            {{ r.status }}
+                        </span>
+                    </td>
+                    <td>{{ r.first_seen[11:19] if r.first_seen else 'N/A' }}</td>
+                    <td>{{ r.last_seen[11:19] if r.last_seen else 'N/A' }}</td>
+                    <td>{{ r.checkout_time[11:19] if r.checkout_time else '—' }}</td>
+                    <td>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width: {{ (r.confidence * 100)|round|int if r.confidence else 0 }}%"></div>
+                            <span>{{ (r.confidence * 100)|round(1) if r.confidence else 0 }}%</span>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <p>No attendance records for this session.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-body">
+        <div class="empty-state">
+            <p>Session not found.</p>
+            <a href="/reports" class="btn btn-primary">Back to Reports</a>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

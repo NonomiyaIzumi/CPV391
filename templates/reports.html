@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% set active = "reports" %}
+{% block title %}Reports{% endblock %}
+{% block page_title %}Reports{% endblock %}
+
+{% block content %}
+<div class="card" id="all-sessions-card">
+    <div class="card-header">
+        <h2>All Sessions</h2>
+        <span class="badge badge-purple">{{ sessions|length }} sessions</span>
+    </div>
+    <div class="card-body">
+        {% if sessions %}
+        <table class="data-table" id="sessions-list-table">
+            <thead>
+                <tr>
+                    <th>Session ID</th>
+                    <th>Class</th>
+                    <th>Start Time</th>
+                    <th>End Time</th>
+                    <th>Duration</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in sessions %}
+                <tr>
+                    <td><code>{{ s.session_id[:8] }}...</code></td>
+                    <td><span class="badge badge-purple">{{ s.class_name or 'N/A' }}</span></td>
+                    <td>{{ s.start_time[:19] if s.start_time else 'N/A' }}</td>
+                    <td>{{ s.end_time[:19] if s.end_time else '🔴 Ongoing' }}</td>
+                    <td>—</td>
+                    <td>
+                        <div class="btn-group-inline">
+                            <a href="/reports/{{ s.session_id }}" class="btn btn-sm btn-outline">View</a>
+                            <a href="/api/sessions/{{ s.session_id }}/export" class="btn btn-sm btn-primary">CSV</a>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <p>No sessions recorded yet. Start an attendance session first.</p>
+            <a href="/attendance" class="btn btn-primary">Start Session</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

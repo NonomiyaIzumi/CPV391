@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% set active = "dashboard" %}
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="stats-grid">
+    <div class="stat-card stat-blue" id="stat-students">
+        <div class="stat-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ total_students }}</span>
+            <span class="stat-label">Total Students</span>
+        </div>
+    </div>
+    <div class="stat-card stat-purple" id="stat-sessions">
+        <div class="stat-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ total_sessions }}</span>
+            <span class="stat-label">Total Sessions</span>
+        </div>
+    </div>
+    <div class="stat-card stat-green" id="stat-today">
+        <div class="stat-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        </div>
+        <div class="stat-info">
+            <span class="stat-value">{{ today_sessions }}</span>
+            <span class="stat-label">Today's Sessions</span>
+        </div>
+    </div>
+</div>
+
+<div class="grid-2col">
+    <div class="card" id="enrolled-students-card">
+        <div class="card-header">
+            <h2>Enrolled Students</h2>
+            <a href="/enrollment" class="btn btn-sm btn-outline">+ Enroll</a>
+        </div>
+        <div class="card-body">
+            {% if students %}
+            <table class="data-table" id="students-table">
+                <thead>
+                    <tr>
+                        <th>Student ID</th>
+                        <th>Name</th>
+                        <th>Samples</th>
+                        <th>Registered</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for s in students %}
+                    <tr>
+                        <td><span class="badge badge-blue">{{ s.student_id }}</span></td>
+                        <td>{{ s.name }}</td>
+                        <td>{{ s.encoding_count }}</td>
+                        <td>{{ s.created_at[:10] if s.created_at else 'N/A' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <p>No students enrolled yet.</p>
+                <a href="/enrollment" class="btn btn-primary">Start Enrollment</a>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card" id="recent-attendance-card">
+        <div class="card-header">
+            <h2>Recent Attendance</h2>
+            <a href="/reports" class="btn btn-sm btn-outline">View All</a>
+        </div>
+        <div class="card-body">
+            {% if recent_records %}
+            <table class="data-table" id="recent-table">
+                <thead>
+                    <tr>
+                        <th>Student</th>
+                        <th>Status</th>
+                        <th>Time In</th>
+                        <th>Confidence</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in recent_records %}
+                    <tr>
+                        <td>
+                            <div class="student-cell">
+                                <strong>{{ r.name }}</strong>
+                                <small>{{ r.student_id }}</small>
+                            </div>
+                        </td>
+                        <td>
+                            <span class="badge {% if r.status == 'Present' %}badge-green{% else %}badge-orange{% endif %}">
+                                {{ r.status }}
+                            </span>
+                        </td>
+                        <td>{{ r.first_seen[11:19] if r.first_seen else 'N/A' }}</td>
+                        <td>
+                            <div class="confidence-bar">
+                                <div class="confidence-fill" style="width: {{ (r.confidence * 100)|round|int if r.confidence else 0 }}%"></div>
+                                <span>{{ (r.confidence * 100)|round(1) if r.confidence else 0 }}%</span>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <p>No attendance records yet.</p>
+                <a href="/attendance" class="btn btn-primary">Start Session</a>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card" id="sessions-overview-card">
+    <div class="card-header">
+        <h2>Sessions Overview</h2>
+    </div>
+    <div class="card-body">
+        {% if sessions %}
+        <table class="data-table" id="sessions-table">
+            <thead>
+                <tr>
+                    <th>Session ID</th>
+                    <th>Class</th>
+                    <th>Start Time</th>
+                    <th>End Time</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in sessions[:5] %}
+                <tr>
+                    <td><code>{{ s.session_id[:8] }}...</code></td>
+                    <td><span class="badge badge-purple">{{ s.class_name or 'N/A' }}</span></td>
+                    <td>{{ s.start_time[:19] if s.start_time else 'N/A' }}</td>
+                    <td>{{ s.end_time[:19] if s.end_time else '🔴 Ongoing' }}</td>
+                    <td><a href="/reports/{{ s.session_id }}" class="btn btn-sm btn-outline">Details</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <p>No sessions recorded yet.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
