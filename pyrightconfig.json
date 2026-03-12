@@ -1,0 +1,14 @@
+{
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "pythonVersion": "3.12"
+    }
+  ],
+  "extraPaths": ["."],
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": "He_thong_diem_danh",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none"
+}
