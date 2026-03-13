@@ -1,217 +1,370 @@
 """
-Face detection using OpenCV's built-in YuNet model (extremely fast on CPU).
-Tối ưu hóa siêu tốc bằng Stateful Rotation Tracker: Ghi nhớ góc camera để không quét lại 4 góc.
+Face detection using YOLOv26 (via Ultralytics) integrated with SAHI for High-Resolution Detection (P2 software emulation).
+Exports and uses OpenVINO for maximum CPU inference speed.
 """
+import os
 import cv2
 import numpy as np
 
-from config import YUNET_MODEL, DET_SCORE_THRESHOLD, MIN_FACE_SIZE
+from ultralytics import YOLO
+from sahi import AutoDetectionModel
+from sahi.predict import get_sliced_prediction, get_prediction
+
+from config import (
+    YOLO_FACE_MODEL, DET_SCORE_THRESHOLD, MIN_FACE_SIZE, 
+    SAHI_SLICE_SIZE, SAHI_OVERLAP, USE_OPENVINO,
+    PERSON_TRACK_MODEL, PERSON_TRACK_IMG_SIZE, PERSON_CONF_THRESHOLD,
+    TRACKER_CONFIG, DETECT_DEVICE,
+)
 
 # ── Global State ───────────────────────────────────────────────
-_detector = None
-_last_successful_angle = 0  # Ghi nhớ góc xoay cam hiện hành để tiết kiệm 75% CPU mỗi khung hình
+_sahi_model = None
+_yolo_model = None
+_person_tracker_model = None
+_detect_frame_idx = 0
 
 
-def get_face_detector(input_size=(320, 320)):
-    """Initialize YuNet model (singleton)."""
-    global _detector
-    if _detector is None:
-        print(f"[Detect] Loading YuNet model: {YUNET_MODEL}")
-        _detector = cv2.FaceDetectorYN.create(
-            model=YUNET_MODEL,
-            config="",
-            input_size=input_size,
-            score_threshold=DET_SCORE_THRESHOLD,
-            nms_threshold=0.3, # Bắt mờ ảo ở xa thì để NMS vừa phải chống trùng
-            top_k=5000,
-        )
-        print("[Detect] YuNet loaded successfully!")
-    else:
-        _detector.setInputSize(input_size)
-    return _detector
-
-
-def transform_points(points: np.ndarray, M: np.ndarray) -> np.ndarray:
-    """Áp dụng ma trận biến đổi Affine cho danh sách các điểm (x, y)."""
-    ones = np.ones((points.shape[0], 1))
-    pts_homogeneous = np.hstack([points, ones])
-    transformed = M.dot(pts_homogeneous.T).T
-    return transformed
-
-
-def _detect_single_angle(detector, img_bgr, center, angle, w, h):
-    """Thực thi YuNet trên 1 góc duy nhất."""
-    if angle == 0:
-        return detector.detect(img_bgr), None
-
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    M_inv = cv2.getRotationMatrix2D(center, -angle, 1.0)
-    
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-    new_w = int((h * sin) + (w * cos))
-    new_h = int((h * cos) + (w * sin))
-    M[0, 2] += (new_w / 2) - center[0]
-    M[1, 2] += (new_h / 2) - center[1]
-    M_inv[0, 2] += center[0] - (new_w / 2)
-    M_inv[1, 2] += center[1] - (new_h / 2)
-    
-    rotated = cv2.warpAffine(img_bgr, M, (new_w, new_h))
-    detector.setInputSize((new_w, new_h))
-    status, faces = detector.detect(rotated)
-    detector.setInputSize((w, h))
-    
-    return (status, faces), M_inv
-
-def _detect_angles(detector, img_bgr: np.ndarray) -> tuple[list, float]:
+def get_face_detector():
     """
-    Stateful Rotation Tracker (Theo dõi trạng thái góc quay của AI):
-    Thay vì quét luôn 4 góc. Hệ thống sẽ:
-    1. Kiểm tra góc thành công ở Frame ngay trước đó. Nếu vẫn CÒN MẶT, thì chốt luôn, KHÔNG QUÉT NỮA. Tốc độ nhảy vọt lên 30 FPS.
-    2. Nếu mất hình, khi đó mới rảnh rang đi quét chậm lại các góc nghiêng để tìm xem camera có bị ai đó vặn/úp ngược hay không.
+    Initialize YOLOv26 model and wrap it in SAHI AutoDetectionModel.
+    Automatically exports to OpenVINO if requested and not already present.
     """
-    global _last_successful_angle
-    h, w = img_bgr.shape[:2]
-    center = (w // 2, h // 2)
-
-    # BƯỚC 1: Quét lại đúng cái góc xịn xò của Frame trước
-    (status, faces), M_inv = _detect_single_angle(detector, img_bgr, center, _last_successful_angle, w, h)
-    
-    if faces is not None and len(faces) > 0:
-        # Nếu AI còn tự tin cao (> 0.6) thì cứ chốt luôn góc này sống lâu dài
-        max_conf = np.max(faces[:, 14])
-        if max_conf > 0.6:
-            return faces, M_inv
-
-    # BƯỚC 2: Rơi vào đây tức là Camera hỏng hình, úp ngược hoặc mất dấu người cũ
-    best_faces = None
-    best_M_inv = None
-    best_total_score = -1
-    best_angle = _last_successful_angle
-    
-    angles = [0, 90, 180, 270]
-    angles.remove(_last_successful_angle) # Đỡ phải test lại góc cũ tốn thời gian
-    
-    # Nhanh chóng duyệt thử xem 3 góc còn lại có tìm ra cái gì không (thời gian chậm 1 chút xíu ở Frame này)
-    for angle in angles:
-        (status, faces), current_M_inv = _detect_single_angle(detector, img_bgr, center, angle, w, h)
-        if faces is not None and len(faces) > 0:
-            total_score = np.sum(faces[:, 14])
-            if total_score > best_total_score:
-                best_total_score = total_score
-                best_faces = faces
-                best_M_inv = current_M_inv
-                best_angle = angle
-
-    # BƯỚC 3: Nếu mà dò ra được 1 góc nào đó có điểm tự tin ngon, HỌC LUÔN góc đó làm trạng thái Stateful cho các Frame sau
-    if best_faces is not None and best_total_score > 0:
-        _last_successful_angle = best_angle
-        # Ghi đè file log ngầm vào terminal cho bạn theo dõi
-        # print(f"📍 TRẠNG THÁI CAMERA THAY ĐỔI: Khóa cứng ở góc lật {best_angle} độ.")
-        return best_faces, best_M_inv
+    global _sahi_model, _yolo_model
+    if _sahi_model is None:
+        print(f"[Detect] Loading YOLO Face model: {YOLO_FACE_MODEL}")
         
-    # Không tìm thấy cái gì cả (Không có người)
-    return None, None
+        model_path = YOLO_FACE_MODEL
+        
+        # Determine if we should use OpenVINO export
+        if USE_OPENVINO:
+            # YOLOv8 export folder format usually drops the .pt extension and adds _openvino_model
+            base_name = os.path.splitext(model_path)[0]
+            ov_model_dir = f"{base_name}_openvino_model"
+            
+            if not os.path.exists(ov_model_dir):
+                print(f"[Detect] OpenVINO model not found at {ov_model_dir}. Exporting now (this takes a moment)...")
+                # Load PyTorch model to export
+                pt_model = YOLO(model_path)
+                # Export to OpenVINO format (half=True for FP16 speedup if supported, though CPU might prefer FP32; we'll stick to default format)
+                pt_model.export(format="openvino", imgsz=640)
+                print("[Detect] OpenVINO export complete!")
+            
+            model_path = ov_model_dir
+            print(f"[Detect] Using OpenVINO model: {model_path}")
+        
+        # Load the PyTorch or OpenVINO model via Ultralytics natively
+        # Then inject it into SAHI's AutoDetectionModel to bypass its rigid path-checking logic
+        pt_model = YOLO(model_path, task='detect')
+        _yolo_model = pt_model
+        
+        from sahi.models.ultralytics import UltralyticsDetectionModel
+        
+        class OpenVINODetectionModel(UltralyticsDetectionModel):
+            def load_model(self):
+                # Bypass default loading and directly use the object we created
+                self.model = pt_model
+                self.set_device()
+        
+        _sahi_model = OpenVINODetectionModel(
+            model_path=model_path,
+            confidence_threshold=DET_SCORE_THRESHOLD,
+            device="cpu", # Force CPU as per requirement
+            category_mapping={"0": "face"}
+        )
+        
+        print("[Detect] SAHI + YOLO loaded successfully!")
+        
+    return _sahi_model
 
 
-def _compute_iou(boxA, boxB):
-    """Tính Intersection over Union (IoU) giữa 2 Bounding Box."""
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
-
-    interArea = max(0, xB - xA) * max(0, yB - yA)
-    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-    
-    if float(boxAArea + boxBArea - interArea) == 0:
-       return 0.0
-    iou = interArea / float(boxAArea + boxBArea - interArea)
-    return iou
+def get_person_tracker_model():
+    """Initialize RT-DETR/Ultralytics model for person detection+tracking."""
+    global _person_tracker_model
+    if _person_tracker_model is None:
+        print(f"[Track] Loading person track model: {PERSON_TRACK_MODEL}")
+        _person_tracker_model = YOLO(PERSON_TRACK_MODEL, task='detect')
+    return _person_tracker_model
 
 
-def _nms_ensemble(faces_list, iou_threshold=0.4):
-    """
-    Ensemble NMS (Thuật toán Non-Maximum Suppression).
-    Loại bỏ các Bounding Box kém chất lượng trùng lặp. Củng cố Box có độ tự tin cao do TTA.
-    """
-    if not faces_list:
+def track_people(frame_bgr: np.ndarray) -> list[dict]:
+    """Track multiple people and return [{'track_id', 'bbox', 'score'}]."""
+    model = get_person_tracker_model()
+    results = model.track(
+        source=frame_bgr,
+        persist=True,
+        tracker=TRACKER_CONFIG,
+        classes=[0],  # person class
+        conf=PERSON_CONF_THRESHOLD,
+        iou=0.5,
+        imgsz=PERSON_TRACK_IMG_SIZE,
+        device=DETECT_DEVICE,
+        verbose=False,
+    )
+
+    if not results:
         return []
 
-    # Sắp xếp các khuôn mặt theo độ tin cậy tự tin (score) giảm dần
-    faces_list = sorted(faces_list, key=lambda x: x["det_score"], reverse=True)
-    keep = []
+    r0 = results[0]
+    if r0.boxes is None or r0.boxes.xyxy is None:
+        return []
 
-    for f in faces_list:
-        f_box = f["bbox"]
+    boxes = r0.boxes.xyxy.cpu().numpy() if hasattr(r0.boxes.xyxy, "cpu") else np.asarray(r0.boxes.xyxy)
+    confs = r0.boxes.conf.cpu().numpy() if hasattr(r0.boxes.conf, "cpu") else np.asarray(r0.boxes.conf)
+    ids = None
+    if getattr(r0.boxes, "id", None) is not None:
+        ids = r0.boxes.id.cpu().numpy().astype(int) if hasattr(r0.boxes.id, "cpu") else np.asarray(r0.boxes.id, dtype=int)
+
+    tracked = []
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = map(int, box)
+        if (x2 - x1) < MIN_FACE_SIZE or (y2 - y1) < MIN_FACE_SIZE:
+            continue
+        tid = int(ids[i]) if ids is not None and i < len(ids) else i
+        tracked.append({
+            "track_id": tid,
+            "bbox": (x1, y1, x2, y2),
+            "score": float(confs[i]) if i < len(confs) else 0.0,
+        })
+    return tracked
+
+
+def _compute_iou(box_a, box_b):
+    xA = max(box_a[0], box_b[0])
+    yA = max(box_a[1], box_b[1])
+    xB = min(box_a[2], box_b[2])
+    yB = min(box_a[3], box_b[3])
+
+    inter_w = max(0, xB - xA)
+    inter_h = max(0, yB - yA)
+    inter = inter_w * inter_h
+    if inter == 0:
+        return 0.0
+
+    area_a = max(1, (box_a[2] - box_a[0]) * (box_a[3] - box_a[1]))
+    area_b = max(1, (box_b[2] - box_b[0]) * (box_b[3] - box_b[1]))
+    return inter / float(area_a + area_b - inter)
+
+
+def _merge_detections(dets: list[dict], iou_threshold: float = 0.5) -> list[dict]:
+    """Keep best-scored face among overlapping boxes."""
+    if not dets:
+        return []
+
+    dets = sorted(dets, key=lambda d: d["det_score"], reverse=True)
+    kept = []
+    for det in dets:
         overlap = False
-        for k in keep:
-            k_box = k["bbox"]
-            if _compute_iou(f_box, k_box) > iou_threshold:
+        for k in kept:
+            if _compute_iou(det["bbox"], k["bbox"]) >= iou_threshold:
                 overlap = True
                 break
         if not overlap:
-            keep.append(f)
+            kept.append(det)
+    return kept
 
-    return keep
 
-
-def _process_faces_output(faces, M_inv, w, h):
-    """Tiền xử lý output thô của YuNet ra format x, y."""
-    parsed = []
-    if faces is None: return parsed
+def _estimate_landmarks_from_bbox(bbox):
+    """
+    YOLOv8-face provides landmarks, but SAHI standard predictions might drop custom tensors.
+    If landmarks are lost during SAHI standard slicing, we estimate 5 dummy landmarks 
+    (eyes, nose, mouth corners) based on the bounding box to prevent SFace from crashing.
+    SFace expectation: [x_re, y_re, x_le, y_le, x_n, y_n, x_rm, y_rm, x_lm, y_lm] (right eye, left eye, nose, right mouth, left mouth)
+    Note: Right/Left is from the observer's perspective in many face datasets, but here we just need structurally valid points.
+    """
+    x1, y1, x2, y2 = bbox
+    w = x2 - x1
+    h = y2 - y1
     
-    for face in faces:
-        bbox_raw = face[0:4] # x, y, fw, fh
-        score = face[14]
-        landmarks_raw = face[4:14].reshape(5, 2)
+    # Rough anatomical proportions
+    re_x, re_y = x1 + w * 0.3, y1 + h * 0.4
+    le_x, le_y = x1 + w * 0.7, y1 + h * 0.4
+    n_x, n_y   = x1 + w * 0.5, y1 + h * 0.6
+    rm_x, rm_y = x1 + w * 0.35, y1 + h * 0.8
+    lm_x, lm_y = x1 + w * 0.65, y1 + h * 0.8
+    
+    return np.array([
+        [re_x, re_y],
+        [le_x, le_y],
+        [n_x, n_y],
+        [rm_x, rm_y],
+        [lm_x, lm_y]
+    ], dtype=np.float32)
 
-        if M_inv is not None:
-            # Xoay ngược toạ độ Landmarks
-            landmarks = transform_points(landmarks_raw, M_inv)
-            x, y, fw, fh = bbox_raw
-            corners = np.array([
-                [x, y], [x + fw, y], [x + fw, y + fh], [x, y + fh]
-            ])
-            corners_rot = transform_points(corners, M_inv)
-            # Box sau khi quay
-            min_x, min_y = np.min(corners_rot[:, 0]), np.min(corners_rot[:, 1])
-            max_x, max_y = np.max(corners_rot[:, 0]), np.max(corners_rot[:, 1])
-            bbox = (int(min_x), int(min_y), int(max_x), int(max_y))
-            fw, fh = int(max_x - min_x), int(max_y - min_y)
-        else:
-            landmarks = landmarks_raw
-            x, y, fw, fh = map(int, bbox_raw)
-            bbox = (max(0, x), max(0, y), min(w, x + fw), min(h, y + fh))
 
+def _process_sahi_output(prediction_result, w, h):
+    """Tiền xử lý kết quả băm ảnh của SAHI ra format x, y và landmarks."""
+    parsed = []
+    
+    for obj_prediction in prediction_result.object_prediction_list:
+        score = obj_prediction.score.value
+        bbox_raw = obj_prediction.bbox.to_xyxy() # [x1, y1, x2, y2]
+        x1, y1, x2, y2 = map(int, bbox_raw)
+        
+        # Clip to image boundaries
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+        
+        fw = x2 - x1
+        fh = y2 - y1
+        
         if fw >= MIN_FACE_SIZE and fh >= MIN_FACE_SIZE:
+            bbox = (x1, y1, x2, y2)
+            
+            # TODO: Extract real landmarks if SAHI preserves custom YOLO outputs in extra_data.
+            # For now, generate estimated landmarks to keep pipeline running.
+            landmarks = _estimate_landmarks_from_bbox(bbox)
+            
             parsed.append({
                 "bbox": bbox,
                 "landmarks": landmarks,
                 "det_score": score
             })
+            
     return parsed
 
-def detect_faces(rgb: np.ndarray) -> list:
-    """
-    Detect faces usando Stateful Rotation Tracking YuNet.
-    Vẫn đảm bảo quét đa góc nhưng FPS cao kịch trần 30-60.
-    """
+
+def _process_yolo_result(result, w, h, flipped=False):
+    """Parse Ultralytics result with real keypoints when available."""
+    parsed = []
+    boxes = result.boxes
+    if boxes is None or boxes.xyxy is None:
+        return parsed
+
+    xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes.xyxy, "cpu") else np.asarray(boxes.xyxy)
+    confs = boxes.conf.cpu().numpy() if hasattr(boxes.conf, "cpu") else np.asarray(boxes.conf)
+
+    keypoints_xy = None
+    if hasattr(result, "keypoints") and result.keypoints is not None and result.keypoints.xy is not None:
+        keypoints_xy = result.keypoints.xy.cpu().numpy() if hasattr(result.keypoints.xy, "cpu") else np.asarray(result.keypoints.xy)
+
+    for i, box in enumerate(xyxy):
+        x1, y1, x2, y2 = map(int, box)
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+        fw = x2 - x1
+        fh = y2 - y1
+        if fw < MIN_FACE_SIZE or fh < MIN_FACE_SIZE:
+            continue
+
+        bbox = (x1, y1, x2, y2)
+        landmarks = None
+        if keypoints_xy is not None and i < len(keypoints_xy):
+            lmk = np.asarray(keypoints_xy[i], dtype=np.float32)
+            if flipped:
+                lmk[:, 0] = (w - 1) - lmk[:, 0]
+            landmarks = lmk
+
+        if landmarks is None or landmarks.shape != (5, 2):
+            landmarks = _estimate_landmarks_from_bbox(bbox)
+
+        parsed.append({
+            "bbox": bbox,
+            "landmarks": landmarks,
+            "det_score": float(confs[i]) if i < len(confs) else float(DET_SCORE_THRESHOLD),
+        })
+
+    return parsed
+
+
+def _detect_with_raw_yolo(rgb: np.ndarray, conf: float, with_flip: bool = True) -> list[dict]:
+    """Direct YOLO inference keeps keypoints, which improves profile-face robustness for SFace."""
     h, w = rgb.shape[:2]
-    # Lấy thể hình cho YuNet là 640 là cực kỳ tiêu chuẩn để cân đối MƯỢT + XA TÍT TẮP
-    detector = get_face_detector((w, h))
+    if _yolo_model is None:
+        return []
 
-    if rgb.shape[-1] == 3:
-        img_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    else:
-        img_bgr = rgb
+    pred = _yolo_model(
+        rgb,
+        conf=conf,
+        iou=0.5,
+        imgsz=640,
+        device="cpu",
+        verbose=False,
+    )
+    raw_dets = _process_yolo_result(pred[0], w, h, flipped=False) if pred else []
 
-    # Luồng xử lý MỚI: Chỉ vứt cho bộ Tracker.
-    faces, M_inv = _detect_angles(detector, img_bgr)
-    results = _process_faces_output(faces, M_inv, w, h)
-    
-    return results
+    if with_flip:
+        flipped = cv2.flip(rgb, 1)
+        pred_flip = _yolo_model(
+            flipped,
+            conf=conf,
+            iou=0.5,
+            imgsz=640,
+            device="cpu",
+            verbose=False,
+        )
+        flip_dets = _process_yolo_result(pred_flip[0], w, h, flipped=True) if pred_flip else []
+        # Remap flipped bboxes to original image coordinates.
+        for det in flip_dets:
+            x1, y1, x2, y2 = det["bbox"]
+            det["bbox"] = (w - x2, y1, w - x1, y2)
+        raw_dets.extend(flip_dets)
+
+    return _merge_detections(raw_dets, iou_threshold=0.45)
+
+
+def detect_faces(rgb: np.ndarray, use_sahi: bool = True) -> list:
+    """
+    Detect faces using SAHI + YOLOv26.
+    Slices the image to find tiny faces at the back of the classroom.
+    """
+    global _detect_frame_idx
+    _detect_frame_idx += 1
+
+    h, w = rgb.shape[:2]
+    detection_model = get_face_detector()
+
+    # Fast path: direct YOLO with real keypoints for better recognition quality.
+    conf_low = max(0.22, DET_SCORE_THRESHOLD - 0.05)
+    direct = _detect_with_raw_yolo(rgb, conf=conf_low, with_flip=False)
+
+    # In fast mode (enrollment), return immediately for maximum FPS.
+    if not use_sahi:
+        return direct
+
+    sahi_faces = []
+    need_sahi = not direct
+
+    if need_sahi:
+        # SAHI runs only when direct YOLO misses, so FPS stays stable in normal cases.
+        result = get_sliced_prediction(
+            rgb,
+            detection_model,
+            slice_height=SAHI_SLICE_SIZE,
+            slice_width=SAHI_SLICE_SIZE,
+            overlap_height_ratio=SAHI_OVERLAP,
+            overlap_width_ratio=SAHI_OVERLAP,
+            perform_standard_pred=False,
+            postprocess_type="NMM",
+            postprocess_match_metric="IOU",
+            postprocess_match_threshold=0.45,
+        )
+        sahi_faces = _process_sahi_output(result, w, h)
+
+    merged = _merge_detections(direct + sahi_faces, iou_threshold=0.45)
+
+    # Final safety fallback for very hard frames.
+    if not merged:
+        heavy = get_sliced_prediction(
+            rgb,
+            detection_model,
+            slice_height=SAHI_SLICE_SIZE,
+            slice_width=SAHI_SLICE_SIZE,
+            overlap_height_ratio=SAHI_OVERLAP,
+            overlap_width_ratio=SAHI_OVERLAP,
+            perform_standard_pred=True,
+            postprocess_type="NMM",
+            postprocess_match_metric="IOU",
+            postprocess_match_threshold=0.45,
+        )
+        merged = _process_sahi_output(heavy, w, h)
+        if not merged:
+            merged = _detect_with_raw_yolo(rgb, conf=0.15, with_flip=True)
+
+    return merged
 
 
 def crop_face(rgb: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:

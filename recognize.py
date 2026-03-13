@@ -1,28 +1,40 @@
 """
-Face recognition using OpenCV's built-in SFace model.
-Embeddings are 128-D vectors. Highly robust to lighting and background.
+Face recognition using InsightFace ArcFace embeddings.
+Embeddings are L2-normalized vectors and compared by cosine distance.
 """
-import cv2
 import numpy as np
+from insightface.utils import face_align
+import insightface
 
-from config import SFACE_MODEL, TOLERANCE
+from config import TOLERANCE
 
-# ── Singleton model instance ───────────────────────────────────
-_recognizer = None
+# ── Singleton model instances ──────────────────────────────────
+_rec_model = None
+
 
 def get_face_recognizer():
-    """Initialize SFace model (singleton)."""
-    global _recognizer
-    if _recognizer is None:
-        print(f"[Recognize] Loading SFace model: {SFACE_MODEL}")
-        _recognizer = cv2.FaceRecognizerSF.create(
-            model=SFACE_MODEL,
-            config="",
-            backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
-            target_id=cv2.dnn.DNN_TARGET_CPU
-        )
-        print("[Recognize] SFace loaded successfully!")
-    return _recognizer
+    """Initialize InsightFace ArcFace recognizer (singleton)."""
+    global _rec_model
+    if _rec_model is None:
+        print("[Recognize] Loading InsightFace ArcFace model...")
+        # model='buffalo_l' includes robust ArcFace recognition model.
+        try:
+            app = insightface.app.FaceAnalysis(
+                name='buffalo_l',
+                providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+            )
+            app.prepare(ctx_id=0, det_size=(640, 640))
+        except Exception:
+            app = insightface.app.FaceAnalysis(
+                name='buffalo_l',
+                providers=['CPUExecutionProvider']
+            )
+            app.prepare(ctx_id=-1, det_size=(640, 640))
+        _rec_model = app.models.get('recognition')
+        if _rec_model is None:
+            raise RuntimeError("InsightFace recognition model not available in buffalo_l package")
+        print("[Recognize] InsightFace ArcFace loaded successfully!")
+    return _rec_model
 
 
 def extract_features(rgb: np.ndarray, face_info: dict) -> np.ndarray:
@@ -32,46 +44,36 @@ def extract_features(rgb: np.ndarray, face_info: dict) -> np.ndarray:
     2. Căn chỉnh khuôn mặt cho thẳng lại, crop thật sát quanh mắt mũi miệng (loại bỏ tóc, gọng kính rầm rà, và background).
     3. Mã hóa thành vector đặc trưng 128-D.
     """
-    recognizer = get_face_recognizer()
-    
-    # SFace and YuNet officially work best under BGR
+    rec_model = get_face_recognizer()
+
+    if "landmarks" not in face_info:
+        return None
+    lmk = np.asarray(face_info["landmarks"], dtype=np.float32)
+    if lmk.shape != (5, 2):
+        return None
+
+    # InsightFace expects BGR image for norm_crop + get_feat.
     if rgb.shape[-1] == 3:
-        img_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        img_bgr = rgb[:, :, ::-1]
     else:
         img_bgr = rgb
 
-    # Format face tensor for SFace alignCrop
-    # SFace expects a numpy array shaped (15,) containing [x, y, w, h, x_re, y_re, x_le, y_le, x_n, y_n, x_rm, y_rm, x_lm, y_lm, det_score]
-    bbox = face_info["bbox"] # (x1, y1, x2, y2)
-    x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
-    
-    landmarks = face_info["landmarks"].flatten() # 10 values
-    score = face_info["det_score"]
-    
-    face_tensor = np.zeros(15, dtype=np.float32)
-    face_tensor[0:4] = [x, y, w, h]
-    face_tensor[4:14] = landmarks
-    face_tensor[14] = score
-
-    # Căn chỉnh mặt để loại bỏ yếu tố môi trường và tư thế
-    aligned_face = recognizer.alignCrop(img_bgr, face_tensor)
-    
-    # Trích xuất 128D
-    feature = recognizer.feature(aligned_face)
-    return feature[0] # Return 1D array
+    aligned = face_align.norm_crop(img_bgr, landmark=lmk, image_size=112)
+    feat = rec_model.get_feat(aligned).flatten().astype(np.float32)
+    norm = np.linalg.norm(feat)
+    if norm < 1e-8:
+        return None
+    return feat / norm
 
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """Compute cosine distance according to SFace standard."""
-    recognizer = get_face_recognizer()
-    # match function returns Cosine Similarity by default if distance_type=0
-    # similarity: higher is better, 1.0 is identical
-    # distance = 1.0 - similarity: lower is better, 0.0 is identical
-    # Reshape arrays for match function
-    a_2d = a.reshape(1, -1)
-    b_2d = b.reshape(1, -1)
-    similarity = recognizer.match(a_2d, b_2d, cv2.FaceRecognizerSF_FR_COSINE)
-    return float(1.0 - similarity)
+    """Compute cosine distance on normalized ArcFace vectors."""
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    an = a / (np.linalg.norm(a) + 1e-8)
+    bn = b / (np.linalg.norm(b) + 1e-8)
+    sim = float(np.dot(an, bn))
+    return float(1.0 - sim)
 
 
 def distance_to_confidence(dist: float, tolerance: float = TOLERANCE) -> float:

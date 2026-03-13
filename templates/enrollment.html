@@ -20,10 +20,14 @@
                     <input type="text" id="student_name" name="name" placeholder="e.g. Nguyen Van A" required>
                 </div>
                 <div class="form-group">
-                    <label for="samples">Number of Samples</label>
-                    <input type="range" id="samples" name="samples" min="5" max="30" value="20"
-                           oninput="document.getElementById('samples-val').textContent = this.value">
-                    <span class="range-value" id="samples-val">20</span>
+                    <label>Pose Sequence (fixed 5 captures)</label>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                        <span class="badge badge-blue">1. Chinh dien</span>
+                        <span class="badge badge-blue">2. Quay trai</span>
+                        <span class="badge badge-blue">3. Quay phai</span>
+                        <span class="badge badge-blue">4. Nhin len</span>
+                        <span class="badge badge-blue">5. Nhin xuong</span>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label for="source">Camera Source</label>
@@ -34,17 +38,23 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px;margin-right:8px"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
                     Start Enrollment
                 </button>
+                <button type="button" class="btn btn-secondary btn-block" id="btn-capture" onclick="captureEnrollmentSample()" disabled>
+                    Capture Current Angle
+                </button>
             </form>
 
             <div class="enrollment-progress" id="enrollment-progress" style="display:none;">
                 <div class="progress-info">
                     <span id="enroll-status-text">Starting...</span>
                 </div>
+                <div class="progress-info">
+                    <span>Current required pose: </span><strong id="enroll-current-pose">Chinh dien</strong>
+                </div>
                 <div class="progress-bar-container">
                     <div class="progress-bar" id="enroll-progress-bar" style="width:0%"></div>
                 </div>
                 <div class="progress-numbers">
-                    <span id="enroll-progress-num">0</span> / <span id="enroll-progress-total">20</span> samples
+                    <span id="enroll-progress-num">0</span> / <span id="enroll-progress-total">5</span> poses
                 </div>
             </div>
         </div>
@@ -128,7 +138,6 @@
 function startEnrollment() {
     const studentId = document.getElementById('student_id').value.trim();
     const name = document.getElementById('student_name').value.trim();
-    const samples = document.getElementById('samples').value;
     const source = document.getElementById('source').value.trim();
 
     if (!studentId || !name) {
@@ -138,23 +147,54 @@ function startEnrollment() {
 
     document.getElementById('enrollment-progress').style.display = 'block';
     document.getElementById('btn-start-enrollment').disabled = true;
+    document.getElementById('btn-capture').disabled = true;
     document.getElementById('camera-overlay').style.display = 'none';
     document.getElementById('camera-led').classList.add('active');
-    document.getElementById('enroll-progress-total').textContent = samples;
+    document.getElementById('enroll-progress-total').textContent = '5';
+    document.getElementById('enroll-current-pose').textContent = 'Chinh dien';
 
     fetch('/api/enrollment/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ student_id: studentId, name: name, samples: parseInt(samples), source: source })
+        body: JSON.stringify({ student_id: studentId, name: name, source: source })
     })
     .then(r => r.json())
     .then(() => {
+        document.getElementById('enroll-status-text').textContent = 'Camera is ready. Move to a face angle and press Capture.';
+        document.getElementById('btn-capture').disabled = false;
         pollEnrollmentStatus();
     })
     .catch(err => {
         alert('Error: ' + err);
         document.getElementById('btn-start-enrollment').disabled = false;
+        document.getElementById('btn-capture').disabled = true;
     });
+}
+
+function captureEnrollmentSample() {
+    const btnCapture = document.getElementById('btn-capture');
+    btnCapture.disabled = true;
+
+    fetch('/api/enrollment/capture', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                alert(data.error);
+            }
+        })
+        .catch(err => alert('Error: ' + err))
+        .finally(() => {
+            setTimeout(() => {
+                fetch('/api/enrollment/status')
+                    .then(r => r.json())
+                    .then(data => {
+                        btnCapture.disabled = !data.running;
+                    })
+                    .catch(() => {
+                        btnCapture.disabled = true;
+                    });
+            }, 200);
+        });
 }
 
 function pollEnrollmentStatus() {
@@ -164,17 +204,23 @@ function pollEnrollmentStatus() {
             .then(data => {
                 document.getElementById('enroll-status-text').textContent = data.message;
                 document.getElementById('enroll-progress-num').textContent = data.progress;
+                if (data.current_pose_label) {
+                    document.getElementById('enroll-current-pose').textContent = data.current_pose_label;
+                }
                 const pct = (data.progress / data.total * 100).toFixed(0);
                 document.getElementById('enroll-progress-bar').style.width = pct + '%';
 
                 if (data.done) {
                     clearInterval(interval);
                     document.getElementById('btn-start-enrollment').disabled = false;
+                    document.getElementById('btn-capture').disabled = true;
                     document.getElementById('camera-led').classList.remove('active');
                     if (data.success) {
                         document.getElementById('enroll-status-text').textContent = '✓ ' + data.message;
                         setTimeout(() => location.reload(), 2000);
                     }
+                } else {
+                    document.getElementById('btn-capture').disabled = false;
                 }
             });
     }, 500);

@@ -92,11 +92,71 @@ def enrollment(student_id: str, name: str, source, samples_needed: int = REQUIRE
             if len(faces) == 0:
                 skipped_reasons["no_face"] += 1
                 status_text += " | No face detected"
-            elif len(faces) > 1:
-                skipped_reasons["multi_face"] += 1
-                status_text += " | Multiple faces! Only 1 allowed"
             else:
-                face = faces[0]
+                img_h, img_w = rgb.shape[:2]
+
+                def _is_full_face(face_info):
+                    x1f, y1f, x2f, y2f = face_info["bbox"]
+                    fwf = x2f - x1f
+                    fhf = y2f - y1f
+                    if fwf <= 0 or fhf <= 0:
+                        return False
+
+                    margin = max(8, int(min(img_h, img_w) * 0.03))
+                    if x1f <= margin or y1f <= margin or x2f >= (img_w - margin) or y2f >= (img_h - margin):
+                        return False
+
+                    lmk = np.asarray(face_info.get("landmarks"))
+                    if lmk.shape != (5, 2):
+                        return False
+
+                    if (np.min(lmk[:, 0]) < x1f + fwf * 0.08 or
+                        np.max(lmk[:, 0]) > x2f - fwf * 0.08 or
+                        np.min(lmk[:, 1]) < y1f + fhf * 0.08 or
+                        np.max(lmk[:, 1]) > y2f - fhf * 0.08):
+                        return False
+
+                    return True
+
+                valid_faces = [f for f in faces if _is_full_face(f)]
+                if not valid_faces:
+                    skipped_reasons["multi_face"] += 1 if len(faces) > 1 else 0
+                    status_text += " | Need full face in frame"
+                    if len(faces) > 1:
+                        status_text += " (others ignored)"
+                    if SHOW_VIDEO:
+                        cv2.putText(
+                            display, status_text, (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, (255, 255, 255), FONT_THICKNESS,
+                        )
+                        progress_pct = len(samples) / samples_needed
+                        bar_w = int(display.shape[1] * 0.6)
+                        bar_x = 10
+                        bar_y = display.shape[0] - 30
+                        cv2.rectangle(display, (bar_x, bar_y), (bar_x + bar_w, bar_y + 20), (50, 50, 50), -1)
+                        cv2.rectangle(display, (bar_x, bar_y), (bar_x + int(bar_w * progress_pct), bar_y + 20), BBOX_COLOR, -1)
+                        cv2.imshow("Enrollment", display)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord("q"):
+                            print("[Enrollment] Cancelled by user.")
+                            release_camera(cap)
+                            conn.close()
+                            return False
+                    time.sleep(0.05)
+                    continue
+
+                # Prefer the nearest subject: largest face area in frame.
+                face = max(
+                    valid_faces,
+                    key=lambda f: max(1, (f["bbox"][2] - f["bbox"][0]) * (f["bbox"][3] - f["bbox"][1]))
+                )
+                if len(valid_faces) > 1:
+                    skipped_reasons["multi_face"] += 1
+                    status_text += f" | {len(valid_faces)} full faces, using largest"
+                elif len(faces) > 1:
+                    skipped_reasons["multi_face"] += 1
+                    status_text += f" | {len(faces)} faces detected, only 1 full face accepted"
+
                 x1, y1, x2, y2 = face["bbox"]
                 face_crop = crop_face(rgb, (x1, y1, x2, y2))
                 face_h, face_w = face_crop.shape[:2]
